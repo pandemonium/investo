@@ -31,10 +31,11 @@ case class Universe(profile: DatabaseProfile) {
              tag._
 
       type Tag
-      type Id = Long @@ Tag
+      type Id         = Long @@ Tag
+      type PrimaryKey = Option[Id]
 
       def mkId(value: Long): Id = tag[Tag][Long](value)
-      def New: Option[Id]       = Option.empty
+      def New: PrimaryKey       = Option.empty
 
       implicit def Implicit =
         MappedColumnType.base[Id, Long](identity, mkId)
@@ -44,7 +45,7 @@ case class Universe(profile: DatabaseProfile) {
   trait AccountsAspect extends AspectLike { self: Schema =>
     import accounts.Implicit
 
-    case class Account(id: Option[accounts.Id],
+    case class Account(id: accounts.PrimaryKey,
                      name: String,
        brokerageAccountId: String,
                      kind: String)
@@ -67,7 +68,7 @@ case class Universe(profile: DatabaseProfile) {
   trait StocksAspect extends AspectLike { self: Schema =>
     import stocks.Implicit
 
-    case class Stock(id: Option[stocks.Id],
+    case class Stock(id: stocks.PrimaryKey,
                  symbol: String,
                    name: String,
                    isin: String)
@@ -109,7 +110,7 @@ case class Universe(profile: DatabaseProfile) {
     import currencies.{Implicit => CurrencyImplicit}
     import transactions.{Implicit => TransactionsImplicit}
 
-    case class Dividend(id: Option[dividends.Id],
+    case class Dividend(id: dividends.PrimaryKey,
                    stockId: stocks.Id,
                     amount: Double,
                     exDate: LocalDate,
@@ -144,42 +145,43 @@ case class Universe(profile: DatabaseProfile) {
       def byStockSymbol(symbol: String): DBIO[Seq[StockDividend]] = (dividends
         join stocks on (_.stockId === _.id)
         filter {
-          case (ds, ss) =>
-            ss.symbol === symbol
+          case (_, s) =>
+            s.symbol === symbol
         } join currencies on {
-          case ((ds, ss), cs) =>
-            ds.currencyId === cs.id 
+          case ((d, _), c) =>
+            d.currencyId === c.id 
         } map {
-          case ((dividend, stock), currency) => 
-            (stock, dividend, currency) <> 
+          case ((d, s), c) => 
+            (s, d, c) <> 
               (StockDividend.tupled, StockDividend.unapply)
         }
       ).result
 
-      def monthAndStockReport(by: Instant) = (transactions
-        join dividends on { 
-          case (t, d) =>
-            (d.stockId === t.stockId) &&
-            (t.bookDate < d.exDate)
-        } join stocks on { 
-          case ((t, d), s) =>
-            s.id === d.stockId
-        } join currencies on { 
-          case (((t, d), s), c) =>
-            c.id === d.currencyId
-        } groupBy { 
-          case (((t, d), s), c) =>
-            (d, s, c)
-        } map { 
-          case ((d, s, c), group) =>
-            val shares = group map { case (((t, _), _), _) =>
-              sellCountsAsNegative(t)
-            }
+      def monthAndStockReport(by: Instant): DBIO[Seq[DividendReportItem]] = 
+        (transactions
+          join dividends on { 
+            case (t, d) =>
+              (d.stockId === t.stockId) &&
+              (t.bookDate < d.exDate)
+          } join stocks on { 
+            case ((t, d), s) =>
+              s.id === d.stockId
+          } join currencies on { 
+            case (((t, d), s), c) =>
+              c.id === d.currencyId
+          } groupBy { 
+            case (((t, d), s), c) =>
+              (d, s, c)
+          } map { 
+            case ((d, s, c), group) =>
+              val shares = group map { case (((t, _), _), _) =>
+                sellCountsAsNegative(t)
+              }
 
-            (s, d, c, shares.sum getOrElse 0) <>
-              (DividendReportItem.tupled, DividendReportItem.unapply)
-          }
-      ).result
+              (s, d, c, shares.sum getOrElse 0) <>
+                (DividendReportItem.tupled, DividendReportItem.unapply)
+            }
+        ).result
     }
 
     object dividends
@@ -197,7 +199,7 @@ case class Universe(profile: DatabaseProfile) {
       new Locale(_)
     )
 
-    case class Currency(id: Option[currencies.Id],
+    case class Currency(id: currencies.PrimaryKey,
                     symbol: String,
                defaultRate: Double,
                     locale: Locale)
@@ -262,7 +264,7 @@ case class Universe(profile: DatabaseProfile) {
         MappedColumnType.base[T, Int](toInt, fromInt)
     }
 
-    case class Transaction(id: Option[transactions.Id],
+    case class Transaction(id: transactions.PrimaryKey,
                       stockId: stocks.Id,
                         count: Int,
                         price: Double,
@@ -296,30 +298,60 @@ case class Universe(profile: DatabaseProfile) {
         Then tx.count
         Else tx.count * -1)
 
+    def sellCountsAsZero(tx: TransactionsTable): Rep[Int] = (Case 
+      If tx.transactionType === TransactionType.buy
+        Then tx.count
+        Else 0)
+
     trait TransactionsFeatures { self: TableQuery[TransactionsTable] =>
       import concurrent.ExecutionContext
 
       case class StockOwnership(id: stocks.Id,
                               name: String,
-                             count: Int)
+                             count: Option[Int],
+                         costBasis: Option[Double])
 
-      def ownedStockBy(deadline: LocalDate): DBIO[Seq[StockOwnership]] =
-        (self filter(_.bookDate <= deadline)
-              groupBy(_.stockId)
-              map {
-                case (id, group) =>
-                  id -> (group.map(sellCountsAsNegative).sum getOrElse 0)
-              } join stocks on {
-                case ((id, sum), stock) => 
-                  id === stock.id 
-              } map {
-                case ((stockId, sum), stock) => 
-                  (stockId, stock.name, sum) <> 
-                    (StockOwnership.tupled, StockOwnership.unapply)
+      def ownedStockBy(deadline: LocalDate): DBIO[Seq[StockOwnership]] = (transactions
+        filter(_.bookDate <= deadline)
+        join stocks on {
+          case (t, s) => t.stockId === s.id
+        } join currencies on {
+          case ((t, s), c) => t.currencyId === c.id
+        } groupBy { 
+          case ((t, s), c) => (s, c) 
+        } map {
+          case ((s, c), group) =>
+            val count = group map {
+              case ((t, s), c) => sellCountsAsNegative(t)
+            }
+
+            val boughtCount = (group
+              map { case ((t, s), c) =>
+                sellCountsAsZero(t)
               }
-        ).result
+            )
 
-      def insert() = ???
+            val boughtValue = (group
+              map { case ((t, s), c) =>
+                sellCountsAsZero(t).asColumnOf[Double] * t.price * c.defaultRate + t.courtage
+              })
+
+            val avg = for {
+              c <- boughtCount.sum
+              bc <- boughtValue.sum
+            } yield (Case
+              If   c === 0 Then 0D
+              Else bc / c.asColumnOf[Double]
+            )
+
+            (s.id, 
+             s.name, 
+             count.sum,
+             avg
+            ) <>
+              (StockOwnership.tupled, StockOwnership.unapply)
+        }
+      ).result
     }
 
     object transactions

@@ -75,8 +75,8 @@ case class Interpreter(universe: Universe,
           result <- lift(schema.transactions ownedStockBy LocalDate.now)
           _      <- IO { 
             result foreach { 
-              case schema.transactions.StockOwnership(_, name, count) =>
-                println(s"$name: $count")
+              case schema.transactions.StockOwnership(_, name, count, basis) =>
+                println(s"$name: $count (${basis})")
             }
           }
         } yield ()

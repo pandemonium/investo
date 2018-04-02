@@ -1,0 +1,25 @@
+Investo
+
+Command line tool to interrogate and update a Postgres database
+representing a portfolio of stock.
+
+ * - List ownership
+ * investo show stocks
+
+ * - Find all stock by pattern
+ * investo search stocks Annal
+
+ * - Info about one
+ * investo show stocks nly
+
+ * - Dividends of one
+ * investo show dividends nly
+
+ * - Forward dividends known, grouped by
+ *    { year-and-company, month-and-company; year; month}
+ *    (defaults to month-and-company)
+ * investo show dividends --yearly --by-stock
+
+ * - Register transaction
+ * investo buy 121 nly for 10.11 USD fee 7 on 1
+ * investo sell 10 alm-a for 123 SEK fee 7 on 1
