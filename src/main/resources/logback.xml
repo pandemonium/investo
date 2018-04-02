@@ -1,0 +1,24 @@
+<configuration>
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level %logger{36} - %msg%n%rEx</pattern>
+        </encoder>
+    </appender>
+
+    <logger name="org.apache.kafka" level="WARN"/>
+    <logger name="cakesolutions" level="INFO"/>
+    <!--
+      <logger name="akka" level="TRACE"/>
+      <logger name="com.github.dnvriend" level="DEBUG" />
+       -->
+    <!--<logger name="akka.event.slf4j.Slf4jLogger" level="WARN"/>-->
+    <!--<logger name="akka.remote.Remoting" level="WARN"/>-->
+    <!--<logger name="akka.cluster.Cluster" level="WARN"/>-->
+
+
+
+    <root level="WARN">
+        <appender-ref ref="STDOUT"/>
+    </root>
+</configuration>
+
