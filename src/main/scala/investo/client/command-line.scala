@@ -82,12 +82,12 @@ object Command {
                                  date: LocalDate)
     extends T
 
-  object Count {
+  object Integer {
     def unapply(text: String): Option[Int] = 
       util.Try(text.toInt).toOption
   }
 
-  object Price {
+  object Decimal {
     def unapply(text: String): Option[Double] =
       util.Try(text.toDouble).toOption
   }
@@ -107,8 +107,8 @@ object Command {
       ShowDividendReport(arg0, arg1)
     case "show" :: "dividends" :: symbol :: Nil =>
       ShowDividends(symbol)
-    case Direction.T(tpe) :: Count(count) :: symbol :: "for" :: Price(price) :: currency :: "fee" :: Price(fee) :: "on" :: Count(accountId) :: Nil =>
-      TransactShares(accountId, symbol, tpe, count, price, fee, currency, LocalDate.now)
+    case Direction.T(direction) :: Integer(count) :: symbol :: "for" :: Decimal(price) :: currency :: "fee" :: Decimal(fee) :: "on" :: Integer(accountId) :: Nil =>
+      TransactShares(accountId, symbol, direction, count, price, fee, currency, LocalDate.now)
   }
 
   def unapply(line: List[String]): Option[T] =

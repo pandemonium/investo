@@ -62,21 +62,34 @@ case class Interpreter(universe: Universe,
     fmt format amount
   }
 
-  def run(command: Command.T)
+  def run(command:     Command.T)
          (implicit ec: ExecutionContext): IO[Unit] = {
-    val db = Database forConfig dbConfig
 
-    def lift[A](action: DBIO[A]): IO[A] =
+    def lift[A](action: DBIO[A])(implicit db: Database): IO[A] =
       IO.fromFuture(IO(db.run(action)))
 
-    def interpretCommand = command match {
+    def transact[A, B](tx: DBIO[A])(f: A => B)
+                      (implicit db: Database): IO[B] = 
+      lift(tx) map f                    
+
+    def interpretCommand(implicit db: Database) = command match {
+      case Command.ShowOwnedStock =>
+        transact(schema.transactions ownedStockBy LocalDate.now) { result =>
+          result foreach {
+            case schema.transactions.StockOwnership(stock, currency, Some(count), Some(basis)) =>
+              println(s"$count\t(${showMoney(basis, currency)})\t${stock.name}")
+            case _ =>
+          }
+        }
+
       case Command.ShowOwnedStock =>
         for {
           result <- lift(schema.transactions ownedStockBy LocalDate.now)
-          _      <- IO { 
-            result foreach { 
-              case schema.transactions.StockOwnership(_, name, count, basis) =>
-                println(s"$name: $count (${basis})")
+          _      <- IO {
+            result foreach {
+              case schema.transactions.StockOwnership(stock, currency, Some(count), Some(basis)) =>
+                println(s"$count\t(${showMoney(basis, currency)})\t${stock.name}")
+              case _ =>
             }
           }
         } yield ()
@@ -86,7 +99,7 @@ case class Interpreter(universe: Universe,
           result <- lift(schema.stocks byPattern pattern)
           _      <- IO {
             result foreach {
-              case schema.Stock(_, symbol, name, _) =>
+              case schema.Stock(_, _, symbol, name, _) =>
                 println(s"($symbol) $name")
             }
           }
@@ -96,10 +109,6 @@ case class Interpreter(universe: Universe,
         for {
           result <- lift(schema.dividends byStockSymbol symbol)
           _      <- IO {
-            result.headOption foreach { sd =>
-              println(s"Dividends for `${sd.stock.name}` (${sd.stock.symbol})")
-            }
-
             result foreach {
               case schema.dividends.StockDividend(_, div, currency) =>
                 println(s"${showMoney(div.amount, currency)} (${showDate(div.exDate)}) ${showDate(div.payDate)}")
@@ -109,7 +118,7 @@ case class Interpreter(universe: Universe,
 
       case Command.ShowDividendReport(flags @ _*) =>
         for {
-          result <- lift(schema.dividends monthAndStockReport Instant.now)
+          result <- lift(schema.dividends receivableAsOf LocalDate.now)
           _      <- IO {
             result foreach {
               case item @ schema.dividends.DividendReportItem(s, d, c, shares) =>
@@ -156,8 +165,9 @@ case class Interpreter(universe: Universe,
     }
 
     for {
-      x <- interpretCommand
-      _ <- IO.fromFuture(IO(db.shutdown))
+      db <- IO(Database.forConfig(dbConfig))
+       x <- interpretCommand(db)
+      _  <- IO.fromFuture(IO(db.shutdown))
     } yield x
   }
 }
