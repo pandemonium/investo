@@ -2,7 +2,8 @@ package investo
 package core
 
 import domain.model._,
-       domain.database._
+       domain.database._,
+       console._, Template._
 import cats.effect._
 import java.time._, format._
 
@@ -68,29 +69,24 @@ case class Interpreter(universe: Universe,
     def lift[A](action: DBIO[A])(implicit db: Database): IO[A] =
       IO.fromFuture(IO(db.run(action)))
 
-    def transact[A, B](tx: DBIO[A])(f: A => B)
-                      (implicit db: Database): IO[B] = 
-      lift(tx) map f                    
-
     def interpretCommand(implicit db: Database) = command match {
-      case Command.ShowOwnedStock =>
-        transact(schema.transactions ownedStockBy LocalDate.now) { result =>
-          result foreach {
-            case schema.transactions.StockOwnership(stock, currency, Some(count), Some(basis)) =>
-              println(s"$count\t(${showMoney(basis, currency)})\t${stock.name}")
-            case _ =>
-          }
-        }
-
       case Command.ShowOwnedStock =>
         for {
           result <- lift(schema.transactions ownedStockBy LocalDate.now)
           _      <- IO {
-            result foreach {
+            import schema.transactions.{ StockOwnership => SO }
+            val cols = Column(Alignment.Right, (_: SO).count.getOrElse(0).toString) ::
+                       Column(Alignment.Left, (_: SO).stock.name) ::
+                       Column(Alignment.Right, (_: SO).costBasis.getOrElse(0D).toString) ::
+                       Nil
+
+              println(cols.format(result))
+            
+/*            result foreach {
               case schema.transactions.StockOwnership(stock, currency, Some(count), Some(basis)) =>
                 println(s"$count\t(${showMoney(basis, currency)})\t${stock.name}")
               case _ =>
-            }
+}*/
           }
         } yield ()
 
