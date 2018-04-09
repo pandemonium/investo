@@ -5,7 +5,11 @@ import domain.model._,
        domain.database._,
        console._, Template._
 import cats.effect._
+import cats._, 
+       cats.data._, 
+       cats.implicits._
 import java.time._, format._
+
 
 object Interpreter {
   implicit class OptionOps[A](val o: Option[A]) extends AnyVal {
@@ -40,88 +44,41 @@ case class Interpreter(universe: Universe,
          universe._,
          profile.api._,
          concurrent._,
-         Interpreter._
+         Interpreter._,
+         presentation._
+  
+  def putStrLn(str: String): IO[Unit] =
+    IO(println(str))
 
-  protected final val DateFormat = (DateTimeFormatter
-    ofPattern "yyyy-MM-dd"
-    withZone ZoneId.systemDefault
-  )
+  def now: IO[LocalDate] =
+    IO(LocalDate.now)
 
-  protected
-  def showDate(i: LocalDate): String =
-    DateFormat.format(i)
-
-  protected
-  def showMoney(amount: Double,
-              currency: schema.Currency): String = {
-    import java.text._,
-           java.util._
-
-    val fmt = NumberFormat getCurrencyInstance currency.locale
-    fmt setCurrency Currency.getInstance(currency.symbol)
-
-    fmt format amount
-  }
-
-  def run(command:     Command.T)
+  def run(    command: Command.T)
          (implicit ec: ExecutionContext): IO[Unit] = {
 
-    def lift[A](action: DBIO[A])(implicit db: Database): IO[A] =
+    def lift[A](action: => DBIO[A])(implicit db: Database): IO[A] =
       IO.fromFuture(IO(db.run(action)))
 
     def interpretCommand(implicit db: Database) = command match {
       case Command.ShowOwnedStock =>
-        for {
-          result <- lift(schema.transactions ownedStockBy LocalDate.now)
-          _      <- IO {
-            import schema.transactions.{ StockOwnership => SO }
-            val cols = Column(Alignment.Right, (_: SO).count.getOrElse(0).toString) ::
-                       Column(Alignment.Left, (_: SO).stock.name) ::
-                       Column(Alignment.Right, (_: SO).costBasis.getOrElse(0D).toString) ::
-                       Nil
-
-              println(cols.format(result))
-            
-/*            result foreach {
-              case schema.transactions.StockOwnership(stock, currency, Some(count), Some(basis)) =>
-                println(s"$count\t(${showMoney(basis, currency)})\t${stock.name}")
-              case _ =>
-}*/
-          }
-        } yield ()
+        (lift(schema.transactions ownedStockBy LocalDate.now)
+          map Presentation.StockOwnershipTable.render
+          >>= putStrLn)
 
       case Command.SearchStock(pattern) =>
-        for {
-          result <- lift(schema.stocks byPattern pattern)
-          _      <- IO {
-            result foreach {
-              case schema.Stock(_, _, symbol, name, _) =>
-                println(s"($symbol) $name")
-            }
-          }
-        } yield ()
+        (lift(schema.stocks byPattern pattern)
+          map Presentation.StocksTable.render
+          >>= putStrLn)
 
       case Command.ShowDividends(symbol) =>
-        for {
-          result <- lift(schema.dividends byStockSymbol symbol)
-          _      <- IO {
-            result foreach {
-              case schema.dividends.StockDividend(_, div, currency) =>
-                println(s"${showMoney(div.amount, currency)} (${showDate(div.exDate)}) ${showDate(div.payDate)}")
-            }
-          }
-        } yield ()
+        (lift(schema.dividends byStockSymbol symbol)
+          map Presentation.DividendsTable.render
+          >>= putStrLn)
 
       case Command.ShowDividendReport(flags @ _*) =>
-        for {
-          result <- lift(schema.dividends receivableAsOf LocalDate.now)
-          _      <- IO {
-            result foreach {
-              case item @ schema.dividends.DividendReportItem(s, d, c, shares) =>
-                println(s"${showDate(d.payDate)} ${showMoney(item.amount, c)}\t${s.name} (${showDate(d.exDate)})")
-            }
-          }
-        } yield ()
+        (lift(schema.dividends receivableAsOf LocalDate.now)
+          map Presentation.DividendReportTable.render
+          >>= putStrLn)
 
       case Command.TransactShares(accountId, sym, direction, cnt, price, fee, curr, date) =>
         val pricePaid       = cnt * price + fee
@@ -151,13 +108,11 @@ case class Interpreter(universe: Universe,
         for {
           tx       <- lift(mkInsertable)
           result   <- lift(schema.transactions += tx)
-          _        <- IO { println("Ok") }
+          _        <- putStrLn("Ok")
         } yield ()
 
       case x =>
-        IO {
-          println(s"Not implemented: $x")
-        }
+        putStrLn(s"Not implemented: $x")
     }
 
     for {

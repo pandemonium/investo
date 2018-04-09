@@ -11,21 +11,19 @@ import domain.database._
 case class Universe(profile: DatabaseProfile) {
   import profile.api._
 
-  trait AspectLike { self: Schema => 
+  trait AspectLike { self: SchemaLike => 
     def datePart(partName: String) =
-    (c: Rep[LocalDate]) =>
-      SimpleFunction[Int]("date_part").apply(Seq(partName, c))
-
-//    val year  = datePart("year")
-//    val month = datePart("month")
+      (c: Rep[LocalDate]) =>
+        SimpleFunction[Int]("date_part").apply(Seq(partName, c))
 
     def year(c: Rep[LocalDate]) =
       SimpleFunction[Int]("date_part").apply(Seq(LiteralColumn("year"), c))
+
     def month(c: Rep[LocalDate]) =
       SimpleFunction[Int]("date_part").apply(Seq(LiteralColumn("month"), c))
   }
 
-  trait Schema {
+  trait SchemaLike {
     trait Domain {
       import shapeless._, 
              tag._
@@ -42,7 +40,7 @@ case class Universe(profile: DatabaseProfile) {
     }
   }
 
-  trait AccountsAspect extends AspectLike { self: Schema =>
+  trait AccountsAspect extends AspectLike { self: SchemaLike =>
     import accounts.Implicit
 
     case class Account(id: accounts.PrimaryKey,
@@ -65,7 +63,7 @@ case class Universe(profile: DatabaseProfile) {
          with Domain
   }
 
-  trait StocksAspect extends AspectLike { self: Schema with CurrenciesAspect =>
+  trait StocksAspect extends AspectLike { self: SchemaLike with CurrenciesAspect =>
     import stocks.Implicit
     import currencies.{Implicit => CurrencyImplicit}
 
@@ -105,9 +103,9 @@ case class Universe(profile: DatabaseProfile) {
          with Domain
   }
 
-  trait DividendsAspects { self: Schema with StocksAspect 
-                                        with CurrenciesAspect
-                                        with TransactionsAspect =>
+  trait DividendsAspects { self: SchemaLike with StocksAspect 
+                                            with CurrenciesAspect
+                                            with TransactionsAspect =>
     import dividends.Implicit
     import stocks.{Implicit => StockImplicit}
     import currencies.{Implicit => CurrencyImplicit}
@@ -140,6 +138,7 @@ case class Universe(profile: DatabaseProfile) {
       case class DividendReportItem(stock: Stock,
                                  dividend: Dividend,
                                  currency: Currency,
+                                costBasis: Double,
                                    shares: Int) {
         def amount: Double =
           dividend.amount * shares * currency.defaultRate
@@ -155,38 +154,34 @@ case class Universe(profile: DatabaseProfile) {
             d.currencyId === c.id 
         } map {
           case ((d, s), c) => 
-            (s, d, c) <> 
-              (StockDividend.tupled, StockDividend.unapply)
+            (s, d, c).mapTo[StockDividend]
         }
       ).result
 
       def receivableAsOf(deadline: LocalDate): DBIO[Seq[DividendReportItem]] = 
         (transactions
-          join dividends on { 
-            case (t, d) =>
-              (d.stockId === t.stockId) &&
-              (t.bookDate < d.exDate)
-          } join stocks on { 
-            case ((t, d), s) =>
-              s.id === d.stockId
-          } join currencies on { 
-            case (((t, d), s), c) =>
-              c.id === d.currencyId
-          } filter {
-            case (((t, d), s), c) =>
-              t.bookDate < deadline
-          } groupBy {
-            case (((t, d), s), c) =>
-              (d, s, c)
-          } map { 
-            case ((d, s, c), group) =>
-              val shares = group map { case (((t, _), _), _) =>
-                sellCountsAsNegative(t)
-              }
+          join dividends on { case (t, d) =>
+            (d.stockId === t.stockId) &&
+            (t.bookDate < d.exDate)
+          } join stocks on { case ((t, d), s) =>
+            s.id === d.stockId
+          } join currencies on { case (((t, d), s), c) =>
+            c.id === d.currencyId
+          } filter { case (((t, d), s), c) =>
+            d.exDate > deadline
+          } groupBy { case (((t, d), s), c) =>
+            (d, s, c)
+          } map { case ((d, s, c), group) =>
+            val ts        = group map { case (((t, _), _), _) => t }
+            val shares    = ts map sellCountsAsNegative
+            val costBasis = transactions.costBasisQuery(ts)
 
-              (s, d, c, shares.sum getOrElse 0) <>
-                (DividendReportItem.tupled, DividendReportItem.unapply)
-            }
+            (s, d, c, costBasis getOrElse 0D, shares.sum getOrElse 0)
+          } sortBy { case (_, dividend, _,_, _) =>
+            dividend.payDate.asc
+          } map { case item =>
+            item.mapTo[DividendReportItem]
+          }
         ).result
     }
 
@@ -196,7 +191,7 @@ case class Universe(profile: DatabaseProfile) {
          with Domain
   }
 
-  trait CurrenciesAspect { self: Schema =>
+  trait CurrenciesAspect { self: SchemaLike =>
     import currencies.Implicit
     import java.util.Locale
 
@@ -234,9 +229,9 @@ case class Universe(profile: DatabaseProfile) {
          with Domain
   }
 
-  trait TransactionsAspect { self: Schema with StocksAspect 
-                                          with CurrenciesAspect 
-                                          with AccountsAspect =>
+  trait TransactionsAspect { self: SchemaLike with StocksAspect 
+                                              with CurrenciesAspect 
+                                              with AccountsAspect =>
     import transactions.Implicit
     import stocks.{    Implicit => StockImplicit}
     import currencies.{Implicit => CurrencyImplicit}
@@ -309,13 +304,31 @@ case class Universe(profile: DatabaseProfile) {
         Then tx.count
         Else 0)
 
+    def pricePaid(tx: TransactionsTable): Rep[Double] = (Case 
+      If tx.transactionType === TransactionType.buy
+        Then tx.pricePaid
+        Else tx.courtage)
+
     trait TransactionsFeatures { self: TableQuery[TransactionsTable] =>
       import concurrent.ExecutionContext
 
+      // Consider adding a costBasis in the stock's local currency
       case class StockOwnership(stock: Stock,
                              currency: Currency,
-                                count: Option[Int],
-                            costBasis: Option[Double])
+                                count: Int,
+                            costBasis: Double)
+
+      def costBasisQuery(ts: Query[TransactionsTable, Transaction, Seq]): Rep[Option[Double]] = {
+        val boughtCount = ts map sellCountsAsZero
+        val boughtValue = ts map pricePaid
+
+        for {
+          c  <- boughtCount.sum
+          bc <- boughtValue.sum
+        } yield (Case If c === 0 
+          Then 0D
+          Else bc / c.asColumnOf[Double])
+      }
 
       def ownedStockBy(deadline: LocalDate): DBIO[Seq[StockOwnership]] = (transactions
         filter(_.bookDate <= deadline)
@@ -327,34 +340,11 @@ case class Universe(profile: DatabaseProfile) {
           case ((t, s), c) => (s, c) 
         } map {
           case ((s, c), group) =>
-            val ownedCount = group map {
-              case ((t, s), c) => sellCountsAsNegative(t)
-            }
+            val ts          = group map { case ((t, s), c) => t }
+            val ownedCount  = ts map sellCountsAsNegative
+            val costBasis   = costBasisQuery(ts)
 
-            val boughtCount = group map { 
-              case ((t, s), c) =>
-                sellCountsAsZero(t)
-            }
-
-            val boughtValue = group map { 
-              case ((t, s), c) =>
-                (sellCountsAsZero(t).asColumnOf[Double] 
-                  * t.price
-                  * c.defaultRate
-                  + t.courtage
-                )
-            }
-
-            val costBasis = for {
-              c  <- boughtCount.sum
-              bc <- boughtValue.sum
-            } yield (Case
-              If   c === 0 Then 0D
-              Else bc / c.asColumnOf[Double]
-            )
-
-            (s, c, ownedCount.sum, costBasis) <>
-              (StockOwnership.tupled, StockOwnership.unapply)
+            (s, c, ownedCount.sum getOrElse 0, costBasis getOrElse 0D).mapTo[StockOwnership]
         }
       ).result
     }
@@ -365,11 +355,13 @@ case class Universe(profile: DatabaseProfile) {
          with Domain
   }
 
-  object schema
-    extends Schema
+  abstract class Schema
+    extends SchemaLike
        with AccountsAspect
        with DividendsAspects
        with StocksAspect
        with CurrenciesAspect
        with TransactionsAspect
+
+  object schema extends Schema  
 }

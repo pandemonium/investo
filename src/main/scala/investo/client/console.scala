@@ -38,15 +38,16 @@ object Template {
   }
 
   implicit class TableTemplate[A](val columns: Seq[Column[A]]) extends AnyVal {
-    def format(rows: Seq[A]): String = {
-      val rs = rows.map(row => columns map(_ makeCell row))
-      val cs = rs.transpose map { column =>
-        val extent = column.maxBy(_.contentLength).contentLength
+    def format(rows: Seq[A]): String =
+      if (rows.nonEmpty) {
+        val rs = rows.map(row => columns map(_ makeCell row))
+        val cs = rs.transpose map { column =>
+          val extent = column.maxBy(_.contentLength).contentLength
 
-        column map(_ render extent)
-      }
+          column map(_ render extent)
+        }
 
-      cs.transpose map(_ mkString " | ") mkString "\n"
-    }
+        cs.transpose map(_ mkString " | ") mkString "\n"
+      } else ""
   }
 }
