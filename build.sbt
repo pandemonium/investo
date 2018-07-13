@@ -2,7 +2,7 @@ import Dependencies._
 
 organization := "com.example"
 
-scalaVersion := "2.12.4"
+scalaVersion := "2.12.6"
 
 version := "0.1.0-SNAPSHOT"
 
@@ -17,11 +17,12 @@ lazy val loggingDependencies = Seq(
 )
 
 libraryDependencies ++= loggingDependencies ++ Seq(
-  scalaTest % Test,
   slick,
   shapeless,
   slickPostgres,
   postgresJdbc,
   slickHikaricp,
-  catsEffects
+  catsEffects,
+  doobieCore,
+  doobiePostgres
 )

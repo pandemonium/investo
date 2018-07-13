@@ -5,7 +5,9 @@ import domain.model._,
        domain.database._,
        console._, Template._
 import cats.effect._
-import java.time._, format._
+import java.time._, 
+       format._,
+       java.util.Locale
 
 object Presentation {
   protected final val DateFormat = (DateTimeFormatter
@@ -13,13 +15,10 @@ object Presentation {
     withZone ZoneId.systemDefault
   )
 
-  protected
   def showDate(i: LocalDate): String =
     DateFormat.format(i)
 
-  protected
-  def showMoney(amount: Double,
-                locale: java.util.Locale): String = {
+  def showMoney(amount: Double, locale: Locale): String = {
     val fmt = java.text.NumberFormat getCurrencyInstance locale
 
     fmt format amount
@@ -28,15 +27,12 @@ object Presentation {
   object StockOwnershipTable {
     type SO = Universe#Schema#TransactionsFeatures#StockOwnership
 
-    private
     def count(row: SO): String = 
       s"${row.count}"
 
-    private
     def costBasis(row: SO): String =
-      showMoney(row.costBasis, row.currency.locale)
+      showMoney(0D/*row.costBasis*/, new Locale("sv", "SE"))
 
-    private
     val template =
       Column(Alignment.Right, count)                ::
       Column(Alignment.Left,  (_: SO).stock.name)   ::
@@ -51,19 +47,15 @@ object Presentation {
   object DividendsTable {
     type SD = Universe#Schema#DividendsFeatures#StockDividend
 
-    private
     def payDate(sd: SD): String =
       showDate(sd.dividend.payDate)
 
-    private
     def exDate(sd: SD): String = 
       showDate(sd.dividend.exDate)
 
-    private
     def amount(sd: SD): String = 
       showMoney(sd.dividend.amount, sd.currency.locale)
 
-    private
     val template =
       Column(Alignment.Right, amount)  ::
       Column(Alignment.Left,  exDate)  ::
@@ -77,7 +69,6 @@ object Presentation {
   object StocksTable {
     type S = Universe#Schema#Stock
 
-    private
     val template =
       Column(Alignment.Right, (_: S).symbol) ::
       Column(Alignment.Left,  (_: S).name)   ::
@@ -90,27 +81,21 @@ object Presentation {
   object DividendReportTable {
     type DRI = Universe#Schema#DividendsFeatures#DividendReportItem
 
-    private
     def payDate(item: DRI): String =
       showDate(item.dividend.payDate)
 
-    private
     def exDate(item: DRI): String = 
       showDate(item.dividend.exDate)
 
-    private
     def amount(item: DRI): String =
-      showMoney(item.amount, item.currency.locale)
+      showMoney(item.amountInSek, new java.util.Locale("sv", "SE"))
 
-    private
     def yoc(item: DRI): String =
-      f"${(item.dividend.amount * item.currency.defaultRate) / item.costBasis * 100}%2.2f%%"
+      f"${(item.dividend.amount * item.currency.defaultRate) / 1D/*item.costBasis*/ * 100}%2.2f%%"
 
-    private
     def name(item: DRI): String =
       item.stock.name
 
-    private 
     val template = 
       Column(Alignment.Left,  payDate) ::
       Column(Alignment.Right, amount)  ::

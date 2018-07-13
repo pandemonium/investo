@@ -73,6 +73,9 @@ case class Universe(profile: DatabaseProfile) {
                    name: String,
                    isin: String)
 
+    case class CostBasis(local: Double,
+                         swedish: Double)
+
     case class StocksTable(tag: Tag) extends Table[Stock](tag, "stocks") {
       def id         = column[stocks.Id]    ("id", O.PrimaryKey, O.AutoInc)
       def currencyId = column[currencies.Id]("currency_id")
@@ -138,23 +141,20 @@ case class Universe(profile: DatabaseProfile) {
       case class DividendReportItem(stock: Stock,
                                  dividend: Dividend,
                                  currency: Currency,
-                                costBasis: Double,
+                                costBasis: (Double, Double),
                                    shares: Int) {
-        def amount: Double =
+        def amountInSek: Double =
           dividend.amount * shares * currency.defaultRate
       }
 
       def byStockSymbol(symbol: String): DBIO[Seq[StockDividend]] = (dividends
         join stocks on (_.stockId === _.id)
-        filter {
-          case (_, s) =>
-            s.symbol === symbol
-        } join currencies on {
-          case ((d, _), c) =>
-            d.currencyId === c.id 
-        } map {
-          case ((d, s), c) => 
-            (s, d, c).mapTo[StockDividend]
+        filter { case (_, s) =>
+          s.symbol === symbol
+        } join currencies on { case ((d, _), c) =>
+          d.currencyId === c.id 
+        } map { case ((d, s), c) => 
+          (s, d, c).mapTo[StockDividend]
         }
       ).result
 
@@ -176,8 +176,8 @@ case class Universe(profile: DatabaseProfile) {
             val shares    = ts map sellCountsAsNegative
             val costBasis = transactions.costBasisQuery(ts)
 
-            (s, d, c, costBasis getOrElse 0D, shares.sum getOrElse 0)
-          } sortBy { case (_, dividend, _,_, _) =>
+            (s, d, c, (0D, 0D), shares.sum getOrElse 0)
+          } sortBy { case (_, dividend, _, _, _) =>
             dividend.payDate.asc
           } map { case item =>
             item.mapTo[DividendReportItem]
@@ -197,7 +197,12 @@ case class Universe(profile: DatabaseProfile) {
 
     implicit def localeColumn = MappedColumnType.base[Locale, String](
       _.getDisplayName,
-      new Locale(_)
+      x => (x split '_').toList match {
+        case lang :: country :: _ =>
+          new Locale(lang, country)
+        case _ =>
+          new Locale(x)
+      }
     )
 
     case class Currency(id: currencies.PrimaryKey,
@@ -217,7 +222,7 @@ case class Universe(profile: DatabaseProfile) {
 
     trait CurrenciesFeatures { self: TableQuery[CurrenciesTable] =>
       def bySymbol(symbol: String): DBIO[Currency] = 
-        filter(_.symbol === symbol).result.head
+        filter(_.symbol === symbol).distinct.result.head
 
       def idFromSymbol(symbol: String): DBIO[currencies.Id] =
         filter(_.symbol === symbol).map(_.id).result.head
@@ -304,47 +309,50 @@ case class Universe(profile: DatabaseProfile) {
         Then tx.count
         Else 0)
 
-    def pricePaid(tx: TransactionsTable): Rep[Double] = (Case 
+    def pricePaidInSek(tx: TransactionsTable): Rep[Double] = (Case 
       If tx.transactionType === TransactionType.buy
         Then tx.pricePaid
         Else tx.courtage)
 
-    trait TransactionsFeatures { self: TableQuery[TransactionsTable] =>
-      import concurrent.ExecutionContext
+    def swedishByLocalRate(tx: TransactionsTable): Rep[Double] =
+      (tx.pricePaid - tx.courtage.asColumnOf[Double]) / (tx.price * tx.count.asColumnOf[Double])
 
-      // Consider adding a costBasis in the stock's local currency
+    trait TransactionsFeatures { self: TableQuery[TransactionsTable] =>
       case class StockOwnership(stock: Stock,
                              currency: Currency,
                                 count: Int,
-                            costBasis: Double)
+                            costBasis: Option[(Double, Double)])
 
-      def costBasisQuery(ts: Query[TransactionsTable, Transaction, Seq]): Rep[Option[Double]] = {
-        val boughtCount = ts map sellCountsAsZero
-        val boughtValue = ts map pricePaid
+      def costBasisQuery(ts: Query[TransactionsTable, Transaction, Seq]): Rep[Option[(Double, Double)]] = {
+        val boughtCount      = ts.map(sellCountsAsZero).sum map { c =>
+          Case If c === 0 Then 1 Else c
+        }
+        val boughtSekValue   = ts map pricePaidInSek
+        val boughtLocalValue = ts map (t => pricePaidInSek(t) / swedishByLocalRate(t))
 
         for {
-          c  <- boughtCount.sum
-          bc <- boughtValue.sum
-        } yield (Case If c === 0 
-          Then 0D
-          Else bc / c.asColumnOf[Double])
+          local <- boughtLocalValue.sum
+          sek   <- boughtSekValue.sum
+          count <- boughtCount
+        } yield (local / count.asColumnOf[Double], sek / count.asColumnOf[Double])
+
+        ???
       }
 
       def ownedStockBy(deadline: LocalDate): DBIO[Seq[StockOwnership]] = (transactions
         filter(_.bookDate <= deadline)
-        join stocks on {
-          case (t, s) => t.stockId === s.id
-        } join currencies on {
-          case ((t, s), c) => t.currencyId === c.id
-        } groupBy { 
-          case ((t, s), c) => (s, c) 
-        } map {
-          case ((s, c), group) =>
-            val ts          = group map { case ((t, s), c) => t }
-            val ownedCount  = ts map sellCountsAsNegative
-            val costBasis   = costBasisQuery(ts)
+        join stocks on { case (t, s) => 
+          t.stockId === s.id
+        } join currencies on { case ((t, s), c) => 
+          t.currencyId === c.id
+        } groupBy { case ((t, s), c) => 
+          (s, c) 
+        } map { case ((s, c), group) =>
+            val ts         = group map { case ((t, _), _) => t }
+            val ownedCount = ts map sellCountsAsNegative
+            val costBasis  = costBasisQuery(ts)
 
-            (s, c, ownedCount.sum getOrElse 0, costBasis getOrElse 0D).mapTo[StockOwnership]
+            (s, c, ownedCount.sum getOrElse 0, costBasis).mapTo[StockOwnership]
         }
       ).result
     }
